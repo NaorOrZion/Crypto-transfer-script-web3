@@ -30,7 +30,7 @@ python -m venv venv
 
 3. **Install dependencies**
 ```bash
-pip install web3 python-dotenv
+pip install -r requirements.txt
 ```
 
 ## Configuration
