@@ -34,6 +34,7 @@ def listen_new_blocks_keep_recent(
     If expected_net_id is set, verifies chain ID matches before starting.
     If target_address is set, prints only transactions to/from that address.
     """
+    is_tx_sent = False
     
     # 1. Verify Net ID if requested
     if expected_net_id is not None:
@@ -104,20 +105,29 @@ def listen_new_blocks_keep_recent(
                     if block.number != target_block:
                         print(f"Block #{block.number} | hash={block.hash.hex()} | txs={tx_count} | time={datetime.fromtimestamp(block.timestamp)}")
                     else:
-                        print(f"###!!!Found transaction Block #{block.number} | Tx Hash: {tx['hash'].hex()}!!!###")
+                        print("#############!!!Found transaction Block #{block.number}!!!#############")
+                        print(
+                        f"Block #{block.number} | hash={block.hash.hex()} | txs={tx_count} | time={datetime.fromtimestamp(block.timestamp)}"
+                    )
                 else:
                     print(
                         f"Block #{block.number} | hash={block.hash.hex()} | txs={tx_count} | time={datetime.fromtimestamp(block.timestamp)}"
-                    )
+                    ) 
+        if not is_tx_sent and len(recent_blocks) > 0:
+            print("\n--- initiating transaction send ---\n")
+            try:
+                # send_sepolia returns just the block number now
+                target_block = send_sepolia.send_sepolia(0.05)
+                is_tx_sent = True
+            except Exception as e:
+                print(f"Error sending transaction: {e}")
+                is_tx_sent = True
+        
         time.sleep(1)
 
 
 if __name__ == "__main__":
-    amount_to_send = 0.05
-    block_number_sent = send_sepolia.send_sepolia(amount_to_send)
-
     listen_new_blocks_keep_recent(
         limit=100,
         expected_net_id=11155111,
-        target_block=block_number_sent
     )
