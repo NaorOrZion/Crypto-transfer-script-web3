@@ -45,4 +45,4 @@ def send_sepolia(amount_to_send):
     print(f"Transaction confirmed! Block number: {tx_receipt.blockNumber}")
     print(f"View on Etherscan: https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}")
 
-    return tx_receipt.blockNumber
+    return tx_receipt.blockNumber, tx_hash
