@@ -8,10 +8,11 @@ import send_sepolia
 load_dotenv()
 INFURA_PROJECT_ID = os.getenv("infura_project_id")
 WSS_URL = f"wss://sepolia.infura.io/ws/v3/{INFURA_PROJECT_ID}"
-MY_TX_HASH = "0x..." # Replace with the transaction hash you want to monitor    
 
 async def watch_blocks_for_tx():
+    target_tx = "0x..." # Replace with the transaction hash you want to monitor    
     is_tx_sent = False
+    tx_block_number = None
     async with AsyncWeb3(WebSocketProvider(WSS_URL)) as w3:
         if await w3.is_connected(): 
             print("Connected via WebSocket!")
@@ -19,7 +20,6 @@ async def watch_blocks_for_tx():
             print("Connection failed")
             return
         
-        target_tx = MY_TX_HASH.lower()
         print(f"Listening for blocks to find tx: {target_tx}...")
 
         subscription_id = await w3.eth.subscribe("newHeads")
@@ -34,12 +34,14 @@ async def watch_blocks_for_tx():
             full_block = await w3.eth.get_block(block_number, full_transactions=True)
             
             found = False
-            for tx in full_block.transactions:
-                if tx['hash'].hex().lower() == target_tx:
-                    print("\n" + "="*40)
-                    print(f"🎯 BINGO! Transaction found in block {block_number}")
-                    print(f"From: {tx['from']}")
-                    print(f"To: {tx['to']}")
+
+            if block_number == tx_block_number:
+                for tx in full_block.transactions:
+                    if tx['hash'].hex().lower() == target_tx:
+                        print("\n" + "="*40)
+                        print(f"🎯 BINGO! Transaction found in block {block_number}")
+                        print(f"From: {tx['from']}")
+                        print(f"To: {tx['to']}")
                     print("="*40 + "\n")
                     found = True
                     break
@@ -52,7 +54,7 @@ async def watch_blocks_for_tx():
                 print("Initiating transaction send...")
                 print("="*40 + "\n")
                 try:
-                    tx_block_number, tx_hash = send_sepolia.send_sepolia(0.01)
+                    tx_block_number, target_tx = send_sepolia.send_sepolia(0.01)
                     is_tx_sent = True
                 except Exception as e:
                     print(f"Error sending transaction: {e}")

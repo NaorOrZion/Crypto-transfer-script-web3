@@ -20,7 +20,6 @@ def send_sepolia(amount_to_send):
     sender_address = web3.eth.account.from_key(sender_private_key).address
 
     receiver_address = os.getenv("receiver_address")
-    amount_to_send = 0.05
 
     nonce = web3.eth.get_transaction_count(sender_address)
 
