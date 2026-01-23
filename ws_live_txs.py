@@ -37,17 +37,12 @@ async def watch_blocks_for_tx():
 
             if block_number == tx_block_number:
                 for tx in full_block.transactions:
-                    if tx['hash'].hex().lower() == target_tx:
+                    if tx['hash'].hex().lower() == target_tx.hex().lower():
                         print("\n" + "="*40)
-                        print(f"🎯 BINGO! Transaction found in block {block_number}")
+                        print(f"BINGO! Transaction found in block {block_number}")
                         print(f"From: {tx['from']}")
                         print(f"To: {tx['to']}")
-                    print("="*40 + "\n")
-                    found = True
-                    break
-            
-            if found:
-                break
+                        print("="*40 + "\n")
 
             if not is_tx_sent:
                 print("\n" + "="*40)
