@@ -1,17 +1,18 @@
 import asyncio
-from web3 import AsyncWeb3, AsyncWebsocketProvider
+from web3 import AsyncWeb3, WebSocketProvider
 from web3.exceptions import TransactionNotFound # חובה לייבא את זה
 from dotenv import load_dotenv
 import os
 import send_sepolia
 
 load_dotenv()
-
 INFURA_PROJECT_ID = os.getenv("infura_project_id")
+WSS_URL = f"wss://sepolia.infura.io/ws/v3/{INFURA_PROJECT_ID}"
+MY_TX_HASH = "0x..." # Replace with the transaction hash you want to monitor    
 
 async def watch_blocks_for_tx():
     is_tx_sent = False
-    async with AsyncWeb3(AsyncWebsocketProvider(WSS_URL)) as w3:
+    async with AsyncWeb3(WebSocketProvider(WSS_URL)) as w3:
         if await w3.is_connected(): 
             print("Connected via WebSocket!")
         else:
@@ -51,7 +52,7 @@ async def watch_blocks_for_tx():
                 print("Initiating transaction send...")
                 print("="*40 + "\n")
                 try:
-                    _, tx_hash = send_sepolia.send_sepolia(0.01)
+                    tx_block_number, tx_hash = send_sepolia.send_sepolia(0.01)
                     is_tx_sent = True
                 except Exception as e:
                     print(f"Error sending transaction: {e}")
