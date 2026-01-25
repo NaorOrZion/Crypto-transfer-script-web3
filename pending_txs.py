@@ -1,6 +1,7 @@
-import asyncio
 from web3 import AsyncWeb3, WebSocketProvider
 from dotenv import load_dotenv
+import send_sepolia
+import asyncio
 import os
 
 load_dotenv()
@@ -24,6 +25,7 @@ async def watch_pending_txs():
         new_heads_sub_id = await w3.eth.subscribe("newHeads")
         
         count_pending_txs = 0
+        _, tx_hash = send_sepolia(0.01)
 
         async for payload in w3.socket.process_subscriptions():
             subscription_id = payload.get("subscription")
@@ -32,7 +34,11 @@ async def watch_pending_txs():
             if subscription_id == pending_tx_sub_id:
                 # It's a new pending transaction
                 count_pending_txs += 1
-                print(f"New Pending Tx: {result.hex().lower()} (Total: {count_pending_txs})")
+                text_user_tx = "============== THIS IS YOUR TRANSACTION WAITING =============="
+                if tx_hash.hex().lower() == result.hex().lower():
+                    print(f"{text_user_tx}\nNew Pending Tx: {result.hex().lower()} (Total: {count_pending_txs})\n{text_user_tx}")
+                else:
+                    print(f"New Pending Tx: {result.hex().lower()} (Total: {count_pending_txs})")
                 
             elif subscription_id == new_heads_sub_id:
                 # It's a new block
