@@ -1,6 +1,5 @@
 import asyncio
 from web3 import AsyncWeb3, WebSocketProvider
-from web3.exceptions import TransactionNotFound # חובה לייבא את זה
 from dotenv import load_dotenv
 import os
 import send_sepolia
