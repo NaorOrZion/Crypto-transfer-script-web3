@@ -25,7 +25,7 @@ async def watch_pending_txs():
         new_heads_sub_id = await w3.eth.subscribe("newHeads")
         
         count_pending_txs = 0
-        _, tx_hash = send_sepolia(0.01)
+        _, tx_hash = send_sepolia.send_sepolia_core(0.01)
 
         async for payload in w3.socket.process_subscriptions():
             subscription_id = payload.get("subscription")
@@ -45,6 +45,24 @@ async def watch_pending_txs():
                 block_number = int(result.get("number", 0))
                 print("\n" + "="*40)
                 print(f"NEW BLOCK MINED! Block: {block_number}")
+                
+                # Check if our transaction is in this block
+                try:
+                    block = await w3.eth.get_block(block_number, full_transactions=True)
+                    found = False
+                    for tx in block.transactions:
+                        if tx.hash == tx_hash:
+                            print(f"SUCCESS! Your transaction was mined in block: {block_number}")
+                            print(f"Transaction Hash: {tx_hash.hex()}")
+                            found = True
+                            break
+                    
+                    if not found:
+                        print(f"Transaction not found in this block. Still pending...")
+                        
+                except Exception as e:
+                    print(f"Error checking block: {e}")
+
                 print(f"Total pending transactions detected before this block: {count_pending_txs}")
                 print("="*40 + "\n")
                 

@@ -21,7 +21,7 @@ def send_sepolia_core(amount_to_send):
 
     receiver_address = os.getenv("receiver_address")
 
-    nonce = web3.eth.get_transaction_count(sender_address)
+    nonce = web3.eth.get_transaction_count(sender_address, 'pending')
 
     tx = {
         'nonce': nonce,
