@@ -16,21 +16,27 @@ def send_sepolia_core(amount_to_send):
         exit()
 
     sender_private_key = os.getenv("sender_private_key")
-
-    sender_address = web3.eth.account.from_key(sender_private_key).address
-
+    account = web3.eth.account.from_key(sender_private_key)
+    sender_address = account.address
     receiver_address = os.getenv("receiver_address")
 
+    amount_in_wei = web3.to_wei(amount_to_send, 'ether')
+    current_gas_price = web3.eth.gas_price
+    gas_limit = 21000
     nonce = web3.eth.get_transaction_count(sender_address)
+    chainId = 11155111
 
     tx = {
         'nonce': nonce,
         'to': receiver_address,
-        'value': web3.to_wei(amount_to_send, 'ether'), 
-        'gas': 21000, # Standard gas price, less than that and the tx will be canceled
-        'gasPrice': web3.eth.gas_price,
-        'chainId': 11155111 # sepolia test net ID
+        'value': amount_in_wei, 
+        'gas': gas_limit,
+        'gasPrice': current_gas_price,
+        'chainId': chainId
     }
+
+    if not pre_state_validation(sender_address, gas_limit, current_gas_price, amount_in_wei, tx):
+        exit()
 
     signed_tx = web3.eth.account.sign_transaction(tx, sender_private_key)
     print(f"Sending {amount_to_send} ETH to {receiver_address}...")
@@ -49,3 +55,30 @@ def send_sepolia(amount_to_send):
     print(f"View on Etherscan: https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}")
 
     return tx_receipt.blockNumber, tx_hash
+
+def pre_state_validation(sender_address, gas_limit, current_gas_price, amount_in_wei, tx):
+    # Check Balance
+    balance = web3.eth.get_balance(sender_address)
+    total_cost = amount_in_wei + (gas_limit * current_gas_price)
+
+    if balance < total_cost:
+        print(f"!!!!!!! Validation Failed: Insufficient funds. !!!!!!!")
+        print(f"Have: {web3.from_wei(balance, 'ether')} ETH")
+        print(f"Need: {web3.from_wei(total_cost, 'ether')} ETH")
+        return False
+    else:
+        print("- Balance Check: Passed")
+
+    # Simulate transaction on infura - shows gas concluded
+    try:
+        simulated_gas = web3.eth.estimate_gas(tx)
+        print(f"- Simulation (Pre-State) Passed! Estimated Gas: {simulated_gas}")
+    except Exception as e:
+        print(f"!!!!!!! Validation Failed: Transaction will revert on-chain. !!!!!!!")
+        print(f"Error details: {e}")
+        return False
+
+    return True
+
+    
+    

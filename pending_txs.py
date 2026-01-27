@@ -25,7 +25,7 @@ async def watch_pending_txs():
         new_heads_sub_id = await w3.eth.subscribe("newHeads")
         
         count_pending_txs = 0
-        _, tx_hash = send_sepolia(0.01)
+        _, tx_hash = send_sepolia.send_sepolia_core(0.01)
 
         async for payload in w3.socket.process_subscriptions():
             subscription_id = payload.get("subscription")
