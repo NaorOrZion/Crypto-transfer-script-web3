@@ -35,7 +35,7 @@ def send_sepolia_core(amount_to_send):
         'chainId': chainId
     }
 
-    if not pre_state_validation(sender_address, gas_limit, current_gas_price, amount_in_wei, tx, web3):
+    if not is_pre_state_validated(sender_address, gas_limit, current_gas_price, amount_in_wei, tx, web3):
         exit()
 
     signed_tx = web3.eth.account.sign_transaction(tx, sender_private_key)
@@ -56,7 +56,7 @@ def send_sepolia(amount_to_send):
 
     return tx_receipt.blockNumber, tx_hash
 
-def pre_state_validation(sender_address, gas_limit, current_gas_price, amount_in_wei, tx, web3):
+def is_pre_state_validated(sender_address, gas_limit, current_gas_price, amount_in_wei, tx, web3):
     # Check Balance
     balance = web3.eth.get_balance(sender_address)
     total_cost = amount_in_wei + (gas_limit * current_gas_price)
@@ -80,5 +80,4 @@ def pre_state_validation(sender_address, gas_limit, current_gas_price, amount_in
 
     return True
 
-    
     
