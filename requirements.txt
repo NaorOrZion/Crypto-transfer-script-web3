@@ -1,2 +1,4 @@
 web3
 python-dotenv
+asyncio
+asyncio-queue

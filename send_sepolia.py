@@ -7,6 +7,8 @@ load_dotenv()
 def send_sepolia_core(amount_to_send):
     infura_project_id = os.getenv("infura_project_id")
     infura_url = f"https://sepolia.infura.io/v3/{infura_project_id}"
+    # alchemy_project_id = os.getenv("alchemy_project_id")
+    # alchemy_url = f"https://eth-sepolia.g.alchemy.com/v2/{alchemy_project_id}"
     web3 = Web3(Web3.HTTPProvider(infura_url))
 
     if web3.is_connected():
@@ -49,7 +51,7 @@ def send_sepolia(amount_to_send):
     web3, tx_hash = send_sepolia_core(amount_to_send)
     print("Waiting for confirmation...")
 
-    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash)
+    tx_receipt = web3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
 
     print(f"Transaction confirmed! Block number: {tx_receipt.blockNumber}")
     print(f"View on Etherscan: https://sepolia.etherscan.io/tx/{web3.to_hex(tx_hash)}")
