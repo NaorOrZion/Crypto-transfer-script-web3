@@ -12,12 +12,12 @@ target_tx_hash = "0x671e475d5dc3c883a19c4aaf7e6b5da347f5a73ba6e0d2e3b27bff4f3dc8
 # List of providers to try, in order
 providers = []
 
-# 1. Infura (from .env)
-infura_id = os.getenv("infura_project_id")
-if infura_id:
+# 1. QuickNode (from .env)
+quicknode_url = os.getenv("QUICKNODE_ENDPOINT")
+if quicknode_url:
     providers.append({
-        "name": "Infura",
-        "url": f"https://sepolia.infura.io/v3/{infura_id}"
+        "name": "QuickNode",
+        "url": quicknode_url
     })
 
 # 2. Public RPCs (fallback)
@@ -60,7 +60,9 @@ def get_prestate_data(tx_hash):
                 for address, state in prestate_data.items():
                     print(f"\nAddress: {address}")
                     if 'balance' in state:
-                        print(f"  Balance: {state['balance']}")
+                        balance_wei = int(state['balance'], 16)
+                        balance_eth = Web3.from_wei(balance_wei, 'ether')
+                        print(f"  Balance: {state['balance']} ({balance_eth} ETH)")
                     if 'nonce' in state:
                         print(f"  Nonce: {state['nonce']}")
                     if 'code' in state:
