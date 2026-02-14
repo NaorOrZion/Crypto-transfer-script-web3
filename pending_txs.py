@@ -8,6 +8,11 @@ load_dotenv()
 INFURA_PROJECT_ID = os.getenv("infura_project_id")
 WSS_URL = f"wss://sepolia.infura.io/ws/v3/{INFURA_PROJECT_ID}"
 
+TARGET_ADDRESSES = [
+    "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E", # Uniswap V3 SwapRouter02 (Sepolia)
+    "0xC532a74256D3Db42D0Bf7a0400fEFDbad7694008", # Uniswap V2 Router (Sepolia Example)
+]
+
 async def watch_pending_txs():
     async with AsyncWeb3(WebSocketProvider(WSS_URL)) as w3:
         if await w3.is_connected():
@@ -30,10 +35,18 @@ async def watch_pending_txs():
         async for payload in w3.socket.process_subscriptions():
             subscription_id = payload.get("subscription")
             result = payload.get("result")
-            
+
             if subscription_id == pending_tx_sub_id:
-                # It's a new pending transaction
+                # It's a new pending transaction; result is the tx hash
                 count_pending_txs += 1
+                try:
+                    tx = await w3.eth.get_transaction(result)
+                    if tx and tx.get("to"):
+                        to_addr = str(tx["to"]).lower()
+                        if to_addr in [a.lower() for a in TARGET_ADDRESSES]:
+                            print("++ That's a Uniswap router tx ++")
+                except Exception:
+                    pass  # tx may not be available yet
                 text_user_tx = "============== THIS IS YOUR TRANSACTION WAITING =============="
                 if tx_hash.hex().lower() == result.hex().lower():
                     print(f"{text_user_tx}\nNew Pending Tx: {result.hex().lower()} (Total: {count_pending_txs})\n{text_user_tx}")
