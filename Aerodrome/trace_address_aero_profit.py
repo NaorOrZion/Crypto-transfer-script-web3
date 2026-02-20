@@ -8,21 +8,25 @@ Tracks for a given wallet address:
   4. Total Gas Fees Paid (USD) — for all txs from this address to Aerodrome contracts.
 
 Logic outline:
-  - Fetch all IncreaseLiquidity, DecreaseLiquidity, Collect from NonFungiblePositionManager,
+  - Fetch all IncreaseLiquidity, DecreaseLiquidity, and Collect from NonFungiblePositionManager,
     and ClaimRewards from each Gauge, over the block range.
-  - Keep only events whose transaction is sent by ADDRESS (tx.from == ADDRESS).
+  - NFPM events are attributed to ADDRESS via: (1) ownerOf(tokenId) or positions(tokenId).operator == ADDRESS
+    at to_block, or (2) if the NFT is staked (ownerOf is a Gauge), then if the tx involves ADDRESS
+    (tx.from, Collect recipient, or ERC20 transfer to/from ADDRESS in that tx). No historical Transfer scan.
+  - Gas is attributed to ADDRESS for every tx that contains any of our NFPM or Gauge events (bot may be tx.from).
   - Net liquidity: for each IncreaseLiquidity (deposit) and DecreaseLiquidity (withdrawal),
     get token0/token1 amounts and block; value at historical price; sum deposits minus withdrawals.
   - Fees: for each Collect, subtract same-tx DecreaseLiquidity amounts (principal) per tokenId;
     value the remainder (fee-only) in USD.
   - AERO: sum ClaimRewards amounts and value at historical AERO price.
-  - Gas: for each distinct tx that our address sent to NFPM or Gauge, sum gas_used * effective_gas_price;
+  - Gas: for each distinct tx that contains our NFPM or Gauge events, sum gas_used * effective_gas_price;
     convert ETH to USD at block price.
   - Net profit = Fees + AERO − Gas (all in USD).
 
 Usage:
   Set RPC_URL, ADDRESS, NFPM_ADDRESS, GAUGE_ADDRESSES, and ABIs below (or load from env/files).
-  Implement get_token_price_usd, get_eth_price_usd, get_aero_price_usd for real USD values.
+  Price data is fetched from the DeFiLlama API (historical prices at block timestamp).
+  Optional: set DEFILLAMA_API_KEY and/or DEFILLAMA_BASE_URL in env.
   Run: python trace_address_aero_profit.py
 
 Output: Summary table with the 4 metrics and Net Profit in USD.
@@ -90,6 +94,13 @@ NFPM_ABI = [
     },
     {
         "inputs": [{"name": "tokenId", "type": "uint256"}],
+        "name": "ownerOf",
+        "outputs": [{"name": "", "type": "address"}],
+        "stateMutability": "view",
+        "type": "function",
+    },
+    {
+        "inputs": [{"name": "tokenId", "type": "uint256"}],
         "name": "positions",
         "outputs": [
             {"name": "nonce", "type": "uint96"},
@@ -127,11 +138,22 @@ GAUGE_ABI = [
 AERO_TOKEN_ADDRESS = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
 
 # Block range to scan (set to None to use from genesis / earliest or a fixed start)
-FROM_BLOCK: Optional[int] = 42269956  # e.g. 5_000_000
-TO_BLOCK: Optional[int] = None    # None = latest
+FROM_BLOCK: Optional[int] = 42401684  # e.g. 5_000_000
+TO_BLOCK: Optional[int] = 42401685    # None = latest
 
 # Chunk size for get_logs to avoid RPC limits (413). QuickNode often needs small chunks.
 LOG_CHUNK_SIZE = 100
+
+# DeFiLlama API (optional API key for higher rate limits)
+DEFILLAMA_BASE_URL = os.getenv("DEFILLAMA_BASE_URL", "https://pro-api.llama.fi").rstrip("/")
+DEFILLAMA_API_KEY = os.getenv("DEFILLAMA_API_KEY")  # optional; if set, inserted in path
+DEFILLAMA_CHAIN = "base"  # chain name for DefiLlama (this script targets Base)
+# Base WETH (wrapped native) for ETH price
+WETH_BASE_ADDRESS = "0x4200000000000000000000000000000000000006"
+
+# In-memory caches to avoid repeated API/RPC calls
+_block_timestamp_cache: dict[int, int] = {}
+_defillama_price_cache: dict[tuple[str, int], Optional[tuple[Decimal, int]]] = {}  # (coin_key, timestamp) -> (price, decimals)
 
 
 def _topic_hex(signature: str) -> str:
@@ -147,9 +169,61 @@ def _address_to_topic(addr: str) -> str:
 
 
 # -----------------------------------------------------------------------------
-# Price fetcher (historical USD at block/time)
-# Replace with your own implementation (e.g. DeFiLlama, CoinGecko, subgraph).
+# Price fetcher via DeFiLlama API (historical USD at block/time)
 # -----------------------------------------------------------------------------
+def _block_timestamp(w3: Web3, block_identifier: int) -> int:
+    """Return Unix timestamp for block; uses cache."""
+    if block_identifier not in _block_timestamp_cache:
+        block = w3.eth.get_block(block_identifier)
+        _block_timestamp_cache[block_identifier] = block["timestamp"]
+    return _block_timestamp_cache[block_identifier]
+
+
+def _defillama_price_at_block(
+    w3: Web3,
+    chain: str,
+    token_address: str,
+    block_identifier: int,
+) -> Optional[tuple[Decimal, int]]:
+    """Get (price_usd, decimals) from DeFiLlama for token at block; uses cache."""
+    ts = _block_timestamp(w3, block_identifier)
+    addr = token_address.strip().lower()
+    if not addr.startswith("0x"):
+        addr = "0x" + addr
+    coin_key = f"{chain}:{addr}"
+    cache_key = (coin_key, ts)
+    if cache_key in _defillama_price_cache:
+        return _defillama_price_cache[cache_key]
+    base = DEFILLAMA_BASE_URL
+    if DEFILLAMA_API_KEY:
+        base = f"{base}/{DEFILLAMA_API_KEY}"
+    url = f"{base}/coins/prices/historical/{ts}/{coin_key}"
+    try:
+        r = requests.get(url, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        coins = data.get("coins") or {}
+        if not coins:
+            _defillama_price_cache[cache_key] = None
+            return None
+        entry = coins.get(coin_key)
+        if not entry and isinstance(coins, dict):
+            for k, v in coins.items():
+                if isinstance(v, dict) and "price" in v:
+                    entry = v
+                    break
+        if not entry or not isinstance(entry, dict) or "price" not in entry:
+            _defillama_price_cache[cache_key] = None
+            return None
+        price_decimal = Decimal(str(entry["price"]))
+        decimals = int(entry.get("decimals", 18))
+        _defillama_price_cache[cache_key] = (price_decimal, decimals)
+        return (price_decimal, decimals)
+    except Exception:
+        _defillama_price_cache[cache_key] = None
+        return None
+
+
 def get_token_price_usd(
     w3: Web3,
     token_address: str,
@@ -158,25 +232,32 @@ def get_token_price_usd(
     decimals: int = 18,
 ) -> Decimal:
     """
-    Return USD value of `amount_wei` of token at `block_identifier`.
-    Default implementation returns 0; you should plug in real price source.
+    Return USD value of `amount_wei` of token at `block_identifier` using DeFiLlama API.
     """
-    # Placeholder: implement with your API or on-chain oracle.
-    # Example: use DefiLlama API by block timestamp, or a price contract.
-    _ = w3, token_address, block_identifier, amount_wei, decimals
-    return Decimal("0")
+    result = _defillama_price_at_block(w3, DEFILLAMA_CHAIN, token_address, block_identifier)
+    if result is None:
+        return Decimal("0")
+    price, _ = result
+    amount_human = Decimal(amount_wei) / Decimal(10**decimals)
+    return amount_human * price
 
 
 def get_eth_price_usd(w3: Web3, block_identifier: int) -> Decimal:
-    """ETH price in USD at block. Placeholder; replace with your source."""
-    _ = w3, block_identifier
-    return Decimal("0")
+    """ETH price in USD at block via DeFiLlama (WETH on Base)."""
+    result = _defillama_price_at_block(w3, DEFILLAMA_CHAIN, WETH_BASE_ADDRESS, block_identifier)
+    if result is None:
+        return Decimal("0")
+    price, _ = result
+    return price
 
 
 def get_aero_price_usd(w3: Web3, block_identifier: int) -> Decimal:
-    """AERO price in USD at block. Placeholder; replace with your source."""
-    _ = w3, block_identifier
-    return Decimal("0")
+    """AERO price in USD at block via DeFiLlama."""
+    result = _defillama_price_at_block(w3, DEFILLAMA_CHAIN, AERO_TOKEN_ADDRESS, block_identifier)
+    if result is None:
+        return Decimal("0")
+    price, _ = result
+    return price
 
 
 # -----------------------------------------------------------------------------
@@ -189,6 +270,8 @@ DECREASE_LIQUIDITY_TOPIC = _topic_hex(
     "DecreaseLiquidity(uint256,uint128,uint256,uint256)"
 )
 COLLECT_TOPIC = _topic_hex("Collect(uint256,address,uint256,uint256)")
+# ERC20/ERC721 Transfer(address,address,uint256) — used to detect token transfers to/from ADDRESS in tx receipts
+TRANSFER_TOPIC = _topic_hex("Transfer(address,address,uint256)")
 # Gauge ClaimRewards — adjust signature if your gauge uses different params
 CLAIM_REWARDS_TOPIC = _topic_hex("ClaimRewards(address,uint256)")
 
@@ -279,7 +362,7 @@ def get_logs_chunked(
 def get_all_nfpm_logs(
     w3: Web3, from_block: int, to_block: int, fallback_w3: Optional[Web3] = None
 ):
-    """Fetch NFPM events. One request per chunk (all 3 topics); on 413 retries that chunk with 3 parallel single-topic requests."""
+    """Fetch NFPM events (IncreaseLiquidity, DecreaseLiquidity, Collect). One request per chunk (all 3 topics); on 413 retries with parallel single-topic requests."""
     nfpm = Web3.to_checksum_address(NFPM_ADDRESS)
     all_three = [
         [INCREASE_LIQUIDITY_TOPIC],
@@ -348,6 +431,102 @@ def decode_nfpm_log(w3: Web3, log: dict, nfpm_contract: Any):
     return None
 
 
+def _topic_match(log_topic: Any, expected_hex: str) -> bool:
+    """Compare log topic (may be HexBytes) to expected '0x...' hex string."""
+    if log_topic is None:
+        return False
+    h = log_topic.hex() if hasattr(log_topic, "hex") else str(log_topic)
+    if not h.startswith("0x"):
+        h = "0x" + h
+    return h.lower() == expected_hex.lower()
+
+
+def _token_ids_from_nfpm_logs(w3: Web3, nfpm: Any, logs: list) -> set:
+    """Extract unique tokenIds from NFPM IncreaseLiquidity, DecreaseLiquidity, Collect logs."""
+    out = set()
+    for log in logs:
+        decoded = decode_nfpm_log(w3, log, nfpm)
+        if decoded and len(decoded) >= 2:
+            out.add(decoded[1])
+    return out
+
+
+def _token_ownership_at_block(
+    w3: Web3,
+    nfpm: Any,
+    token_ids: set,
+    block: int,
+    address: str,
+    gauge_addresses: list,
+) -> tuple[set, set]:
+    """
+    For each tokenId call ownerOf and positions(tokenId).operator at block.
+    Returns (token_ids_owned_or_operated, token_ids_staked).
+    - owned_or_operated: ownerOf == ADDRESS or operator == ADDRESS (direct attribution).
+    - staked: ownerOf in GAUGE_ADDRESSES (attribute via tx involvement).
+    """
+    address_lower = address.lower()
+    gauge_lower = {(a or "").strip().lower() for a in gauge_addresses if a}
+    gauge_lower = {g if g.startswith("0x") else "0x" + g for g in gauge_lower}
+    owned_or_operated: set = set()
+    staked: set = set()
+    for tid in token_ids:
+        try:
+            owner = nfpm.functions.ownerOf(tid).call(block_identifier=block)
+            owner_lower = (owner or "").lower()
+            if owner_lower == address_lower:
+                owned_or_operated.add(tid)
+                continue
+            if owner_lower in gauge_lower:
+                staked.add(tid)
+                continue
+            pos = nfpm.functions.positions(tid).call(block_identifier=block)
+            operator = (pos[1] or "").lower()  # operator is index 1 in positions tuple
+            if operator == address_lower:
+                owned_or_operated.add(tid)
+        except Exception:
+            pass
+    return (owned_or_operated, staked)
+
+
+def _tx_involves_address(
+    receipt: Optional[dict],
+    tx: Optional[dict],
+    address_lower: str,
+    nfpm_address_lower: str,
+    collect_recipients_in_tx: set,
+) -> bool:
+    """
+    True if this tx involves ADDRESS: tx.from, or Collect recipient, or any ERC20 Transfer to/from ADDRESS.
+    """
+    if tx and (tx.get("from") or "").lower() == address_lower:
+        return True
+    if collect_recipients_in_tx and address_lower in {r.lower() for r in collect_recipients_in_tx}:
+        return True
+    if not receipt or not receipt.get("logs"):
+        return False
+    for log in receipt["logs"]:
+        addr = (log.get("address") or b"").hex() if hasattr(log.get("address"), "hex") else str(log.get("address") or "")
+        if not addr.startswith("0x"):
+            addr = "0x" + addr
+        addr = addr.lower()
+        topics = log.get("topics") or []
+        if len(topics) < 3:
+            continue
+        if not _topic_match(topics[0], TRANSFER_TOPIC):
+            continue
+        def _topic_to_addr(t):
+            h = t.hex() if hasattr(t, "hex") else str(t)
+            if h.startswith("0x"):
+                h = h[2:]
+            return ("0x" + h[-40:]).lower()
+        from_addr = _topic_to_addr(topics[1])
+        to_addr = _topic_to_addr(topics[2])
+        if from_addr == address_lower or to_addr == address_lower:
+            return True
+    return False
+
+
 def decode_gauge_log(log: dict):
     """Decode Gauge ClaimRewards: user (indexed), amount. Returns (user, amount, block_number, tx_hash)."""
     if not log.get("topics") or len(log["topics"]) < 2:
@@ -399,20 +578,59 @@ def run_analysis() -> None:
         abi=NFPM_ABI,
     )
 
-    # ---------- 1) Fetch and filter NFPM logs (only txs from our address) ----------
+    address_lower = address.lower()
+    nfpm_address_lower = Web3.to_checksum_address(NFPM_ADDRESS).lower()
+
+    # ---------- 1) Fetch all NFPM logs and extract unique tokenIds ----------
     nfpm_logs = get_all_nfpm_logs(w3, from_block, to_block, fallback_w3)
-    tx_to_sender: dict = {}
-    our_nfpm_logs = []
+    unique_token_ids = _token_ids_from_nfpm_logs(w3, nfpm, nfpm_logs)
+
+    # ---------- 2) Direct contract calls: ownerOf and positions().operator at to_block ----------
+    token_ids_owned_or_operated, token_ids_staked = _token_ownership_at_block(
+        w3, nfpm, unique_token_ids, to_block, address, GAUGE_ADDRESSES
+    )
+
+    # ---------- 3) Per-tx: does this tx involve ADDRESS? (tx.from, Collect recipient, or ERC20 transfer) ----------
+    logs_by_tx: dict = defaultdict(list)
     for log in nfpm_logs:
         tx_hash = log["transactionHash"]
-        if isinstance(tx_hash, bytes):
-            tx_hash = tx_hash.hex()
-        if tx_hash not in tx_to_sender:
-            tx_to_sender[tx_hash] = get_tx_sender(w3, tx_hash)
-        if tx_to_sender[tx_hash] == address:
+        tx_hash = tx_hash.hex() if isinstance(tx_hash, bytes) else tx_hash
+        logs_by_tx[tx_hash].append(log)
+    collect_recipients_by_tx: dict = defaultdict(set)
+    for tx_hash, logs in logs_by_tx.items():
+        for log in logs:
+            decoded = decode_nfpm_log(w3, log, nfpm)
+            if decoded and decoded[0] == "Collect" and len(decoded) > 5:
+                collect_recipients_by_tx[tx_hash].add(decoded[5])
+    tx_involves_address: dict = {}
+    for tx_hash in logs_by_tx:
+        receipt = get_tx_receipt(w3, tx_hash)
+        tx_obj = w3.eth.get_transaction(tx_hash) if tx_hash else None
+        tx_involves_address[tx_hash] = _tx_involves_address(
+            receipt,
+            tx_obj,
+            address_lower,
+            nfpm_address_lower,
+            collect_recipients_by_tx.get(tx_hash, set()),
+        )
+
+    # ---------- 4) Filter NFPM logs: keep if tokenId is owned/operated by ADDRESS, or staked and tx involves ADDRESS, or tx involves ADDRESS ----------
+    our_nfpm_logs = []
+    for log in nfpm_logs:
+        decoded = decode_nfpm_log(w3, log, nfpm)
+        if not decoded or len(decoded) < 2:
+            continue
+        token_id = decoded[1]
+        tx_hash = log["transactionHash"]
+        tx_hash = tx_hash.hex() if isinstance(tx_hash, bytes) else tx_hash
+        if token_id in token_ids_owned_or_operated:
+            our_nfpm_logs.append(log)
+        elif token_id in token_ids_staked and tx_involves_address.get(tx_hash, False):
+            our_nfpm_logs.append(log)
+        elif tx_involves_address.get(tx_hash, False):
             our_nfpm_logs.append(log)
 
-    # ---------- 2) Fetch and filter Gauge logs ----------
+    # ---------- 5) Fetch and filter Gauge logs (ClaimRewards where user == ADDRESS) ----------
     gauge_logs = get_all_gauge_logs(w3, from_block, to_block, fallback_w3)
     our_claim_events = []  # (user, amount, block, tx_hash)
     for log in gauge_logs:
@@ -420,7 +638,7 @@ def run_analysis() -> None:
         if decoded and decoded[0] and decoded[0].lower() == address.lower():
             our_claim_events.append(decoded)
 
-    # ---------- 3) Decode NFPM events and group by tx for Collect fee logic ----------
+    # ---------- 6) Decode NFPM events and group by tx for Collect fee logic ----------
     # Liquidity: sum (Increase - Decrease) per token in raw amounts; we'll value in USD later.
     deposit_amount0: dict[int, list[tuple[int, int, int]]] = defaultdict(list)  # tokenId -> [(amount0, amount1, block)]
     withdraw_amount0: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
@@ -447,7 +665,7 @@ def run_analysis() -> None:
             _, token_id, amt0, amt1, block, _ = decoded
             tx_collects[tx_hash].append((token_id, amt0, amt1, block))
 
-    # ---------- 4) Build deposit/withdraw event lists for USD valuation ----------
+    # ---------- 7) Build deposit/withdraw event lists for USD valuation ----------
     deposit_events: list[tuple[int, int, int, int]] = []  # tokenId, amount0, amount1, block
     withdraw_events: list[tuple[int, int, int, int]] = []
     for token_id, events in deposit_amount0.items():
@@ -457,7 +675,7 @@ def run_analysis() -> None:
         for amt0, amt1, block in events:
             withdraw_events.append((token_id, amt0, amt1, block))
 
-    # ---------- 5) Fee-only Collect amounts (Collect - same-tx Decrease per tokenId) ----------
+    # ---------- 8) Fee-only Collect amounts (Collect - same-tx Decrease per tokenId) ----------
     fee_collect_events: list[tuple[int, int, int, int]] = []  # tokenId, fee0, fee1, block
     for tx_hash, collects in tx_collects.items():
         decrease_for_tx = tx_decrease.get(tx_hash, {})
@@ -467,7 +685,7 @@ def run_analysis() -> None:
             fee1 = amt1 - principal1 if amt1 >= principal1 else 0
             fee_collect_events.append((token_id, fee0, fee1, block))
 
-    # ---------- 6) Resolve token0/token1 for each tokenId (cache) ----------
+    # ---------- 9) Resolve token0/token1 for each tokenId (cache) ----------
     token_id_to_tokens: dict[int, tuple[str, str]] = {}
     all_token_ids = set(e[0] for e in deposit_events + withdraw_events + fee_collect_events)
     for token_id in all_token_ids:
@@ -489,7 +707,7 @@ def run_analysis() -> None:
         except Exception:
             return 18
 
-    # ---------- 7) USD values (using placeholder price fetcher; replace with real source) ----------
+    # ---------- 10) USD values (DeFiLlama historical prices) ----------
     def usd_deposit_withdraw(events: list[tuple[int, int, int, int]], sign: int) -> Decimal:
         total = Decimal("0")
         for token_id, amt0, amt1, block in events:
@@ -515,7 +733,8 @@ def run_analysis() -> None:
     for _, amount, block, _ in our_claim_events:
         aero_claimed_usd += get_aero_price_usd(w3, block) * (Decimal(amount) / Decimal(10**18))
 
-    # ---------- 8) Gas costs for our txs that hit NFPM or Gauge ----------
+    # ---------- 11) Gas costs for every tx that contains our NFPM or Gauge events ----------
+    # (Bot/Router may be tx.from; we attribute gas to the LP for those txs.)
     gas_cost_wei = 0
     seen_tx = set()
     tx_hashes_to_check = set()
@@ -532,8 +751,6 @@ def run_analysis() -> None:
         if not receipt:
             continue
         tx = w3.eth.get_transaction(tx_hash)
-        if tx.get("from", "").lower() != address.lower():
-            continue
         gas_used = receipt.get("gasUsed") or 0
         if hasattr(gas_used, "to_wei"):
             gas_used = gas_used.to_wei()
@@ -545,7 +762,7 @@ def run_analysis() -> None:
     eth_price = get_eth_price_usd(w3, to_block)
     gas_cost_usd = (Decimal(gas_cost_wei) / Decimal(10**18)) * eth_price
 
-    # ---------- 9) Net profit and summary ----------
+    # ---------- 12) Net profit and summary ----------
     net_profit_usd = fee_earned_usd + aero_claimed_usd - gas_cost_usd
     # Net liquidity is capital in/out; profit from fees + rewards - gas. Optionally: net_profit_usd -= net_liquidity_usd only if you treat liquidity as “cost” (usually you don’t for PnL).
 
