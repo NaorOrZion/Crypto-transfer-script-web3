@@ -52,8 +52,9 @@ RPC_URL = os.getenv("QUICKNODE_BASE_ENDPOINT") or "https://mainnet.base.org"
 FALLBACK_RPC_URL = os.getenv("FALLBACK_RPC_URL") or "https://mainnet.base.org"
 ADDRESS = "0xCF979E05C91450e1FB5d98139101F0EFcd934d07"  # LP wallet to analyze
 
-# Aerodrome Slipstream on Base (replace if using different deployment)
-NFPM_ADDRESS = "0xc9a6168af88b35a9313183cd5bd4f362c34a6c71"  # NonFungiblePositionManager
+# Aerodrome Slipstream on Base — use the contract that emits NFPM events (see Basescan "Address" on IncreaseLiquidity/Collect/Transfer logs)
+# On Base mainnet this is the SlipStream Non Fungible Position Manager (AERO-CL-POS)
+NFPM_ADDRESS = "0x827922686190790b37229fd06084350e74485b72"  # Aerodrome: SlipStream Non Fungible Position Manager (Base)
 GAUGE_ADDRESSES: list[str] = ["0xF33a96b5932D9E9B9A0eDA447AbD8C9d48d2e0c8"]  # Add gauge address(es), e.g. ["0x..."] — one per pool
 
 # ABIs — you can replace these with full ABIs from your source
@@ -140,6 +141,9 @@ AERO_TOKEN_ADDRESS = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
 # Block range to scan (set to None to use from genesis / earliest or a fixed start)
 FROM_BLOCK: Optional[int] = 42401684  # e.g. 5_000_000
 TO_BLOCK: Optional[int] = 42401685    # None = latest
+
+# Set TRACE_AERO_DEBUG=1 in env to print pipeline counts (nfpm_logs, tokenIds, our_nfpm_logs, etc.)
+DEBUG = os.getenv("TRACE_AERO_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 # Chunk size for get_logs to avoid RPC limits (413). QuickNode often needs small chunks.
 LOG_CHUNK_SIZE = 100
@@ -403,26 +407,34 @@ def get_all_gauge_logs(
     return out
 
 
+def _normalize_topic(t: Any) -> str:
+    """Return topic as '0x' + hex string for comparison with _topic_hex() values."""
+    if t is None:
+        return ""
+    h = t.hex() if hasattr(t, "hex") else str(t)
+    return h if h.startswith("0x") else "0x" + h
+
+
 def decode_nfpm_log(w3: Web3, log: dict, nfpm_contract: Any):
     """Decode NFPM log to event name and args (tokenId, amount0, amount1, ...)."""
-    topic = log["topics"][0].hex() if log.get("topics") else ""
+    topic = _normalize_topic(log["topics"][0] if log.get("topics") else None)
     data = log.get("data") or b""
     if isinstance(data, str) and data.startswith("0x"):
         data = bytes.fromhex(data[2:])
-    if topic == INCREASE_LIQUIDITY_TOPIC:
+    if topic.lower() == INCREASE_LIQUIDITY_TOPIC.lower():
         token_id = int(log["topics"][1].hex(), 16)
         # data: liquidity (uint128), amount0 (uint256), amount1 (uint256)
         liquidity = int.from_bytes(data[:16], "big")
         amount0 = int.from_bytes(data[16:48], "big")
         amount1 = int.from_bytes(data[48:80], "big")
         return ("IncreaseLiquidity", token_id, amount0, amount1, log["blockNumber"])
-    if topic == DECREASE_LIQUIDITY_TOPIC:
+    if topic.lower() == DECREASE_LIQUIDITY_TOPIC.lower():
         token_id = int(log["topics"][1].hex(), 16)
         liquidity = int.from_bytes(data[:16], "big")
         amount0 = int.from_bytes(data[16:48], "big")
         amount1 = int.from_bytes(data[48:80], "big")
         return ("DecreaseLiquidity", token_id, amount0, amount1, log["blockNumber"])
-    if topic == COLLECT_TOPIC:
+    if topic.lower() == COLLECT_TOPIC.lower():
         token_id = int(log["topics"][1].hex(), 16)
         recipient = "0x" + data[12:32].hex()[-40:]
         amount0 = int.from_bytes(data[32:64], "big")
@@ -629,6 +641,15 @@ def run_analysis() -> None:
             our_nfpm_logs.append(log)
         elif tx_involves_address.get(tx_hash, False):
             our_nfpm_logs.append(log)
+
+    if DEBUG:
+        print("[DEBUG] NFPM logs in range:", len(nfpm_logs))
+        print("[DEBUG] Unique tokenIds from those logs:", sorted(unique_token_ids))
+        print("[DEBUG] TokenIds owned_or_operated by ADDRESS:", sorted(token_ids_owned_or_operated))
+        print("[DEBUG] TokenIds staked (owner = Gauge):", sorted(token_ids_staked))
+        for h, inv in tx_involves_address.items():
+            print("[DEBUG] Tx", h[:18] + "... involves ADDRESS:", inv)
+        print("[DEBUG] Our NFPM logs (after filter):", len(our_nfpm_logs))
 
     # ---------- 5) Fetch and filter Gauge logs (ClaimRewards where user == ADDRESS) ----------
     gauge_logs = get_all_gauge_logs(w3, from_block, to_block, fallback_w3)
