@@ -139,8 +139,8 @@ GAUGE_ABI = [
 AERO_TOKEN_ADDRESS = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
 
 # Block range to scan (set to None to use from genesis / earliest or a fixed start)
-FROM_BLOCK: Optional[int] = 42401684  # e.g. 5_000_000
-TO_BLOCK: Optional[int] = 42401685    # None = latest
+FROM_BLOCK: Optional[int] = 42487586  # e.g. 5_000_000
+TO_BLOCK: Optional[int] = None    # None = latest
 
 # Set TRACE_AERO_DEBUG=1 in env to print pipeline counts (nfpm_logs, tokenIds, our_nfpm_logs, etc.)
 DEBUG = os.getenv("TRACE_AERO_DEBUG", "").strip().lower() in ("1", "true", "yes")
@@ -637,8 +637,10 @@ def run_analysis() -> None:
             collect_recipients_by_tx.get(tx_hash, set()),
         )
 
-    # ---------- 4) Filter NFPM logs: keep if tokenId is owned/operated by ADDRESS, or staked and tx involves ADDRESS, or tx involves ADDRESS ----------
+    # ---------- 4) Filter NFPM logs by tokenId ownership ----------
+    # Only keep events for tokenIds that belong to ADDRESS (owned, operated, or staked+tx-involvement).
     our_nfpm_logs = []
+    our_token_ids_seen: set = set()
     for log in nfpm_logs:
         decoded = decode_nfpm_log(w3, log, nfpm)
         if not decoded or len(decoded) < 2:
@@ -648,19 +650,21 @@ def run_analysis() -> None:
         tx_hash = tx_hash.hex() if isinstance(tx_hash, bytes) else tx_hash
         if token_id in token_ids_owned_or_operated:
             our_nfpm_logs.append(log)
+            our_token_ids_seen.add(token_id)
         elif token_id in token_ids_staked and tx_involves_address.get(tx_hash, False):
             our_nfpm_logs.append(log)
-        elif tx_involves_address.get(tx_hash, False):
-            our_nfpm_logs.append(log)
+            our_token_ids_seen.add(token_id)
 
     if DEBUG:
         print("[DEBUG] NFPM logs in range:", len(nfpm_logs))
         print("[DEBUG] Unique tokenIds from those logs:", sorted(unique_token_ids))
         print("[DEBUG] TokenIds owned_or_operated by ADDRESS:", sorted(token_ids_owned_or_operated))
         print("[DEBUG] TokenIds staked (owner = Gauge):", sorted(token_ids_staked))
-        for h, inv in tx_involves_address.items():
-            print("[DEBUG] Tx", h[:18] + "... involves ADDRESS:", inv)
-        print("[DEBUG] Our NFPM logs (after filter):", len(our_nfpm_logs))
+        print("[DEBUG] Our NFPM logs (after filter):", len(our_nfpm_logs), "for tokenIds:", sorted(our_token_ids_seen))
+        for log in our_nfpm_logs:
+            d = decode_nfpm_log(w3, log, nfpm)
+            if d:
+                print(f"[DEBUG]   {d[0]} tokenId={d[1]} amt0={d[2]} amt1={d[3]} block={log['blockNumber']}")
 
     # ---------- 5) Fetch and filter Gauge logs (ClaimRewards where user == ADDRESS) ----------
     gauge_logs = get_all_gauge_logs(w3, from_block, to_block, fallback_w3)
