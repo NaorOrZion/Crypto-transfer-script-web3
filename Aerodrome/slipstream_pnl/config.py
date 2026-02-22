@@ -28,7 +28,7 @@ WETH_BASE_ADDRESS: str = "0x4200000000000000000000000000000000000006"
 
 # ── Block range ──────────────────────────────────────────────────────────────
 FROM_BLOCK: Optional[int] = 42487586
-TO_BLOCK: Optional[int] = None  # None = latest
+TO_BLOCK: Optional[int] = 42487586  # None = latest
 
 # ── Log fetching ─────────────────────────────────────────────────────────────
 LOG_CHUNK_SIZE: int = 100

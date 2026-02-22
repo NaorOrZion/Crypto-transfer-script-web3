@@ -189,14 +189,34 @@ class PnLResult:
 
     def __init__(self) -> None:
         self.net_liquidity_usd = Decimal("0")
+        self.gross_deposited_usd = Decimal("0")
+        self.gross_withdrawn_usd = Decimal("0")
+        self.deposit_count = 0
+        self.withdraw_count = 0
         self.fee_earned_usd = Decimal("0")
         self.aero_claimed_wei = 0
         self.aero_claimed_usd = Decimal("0")
         self.gas_cost_usd = Decimal("0")
 
     @property
+    def rebalance_count(self) -> int:
+        return min(self.deposit_count, self.withdraw_count)
+
+    @property
     def net_profit_usd(self) -> Decimal:
         return self.fee_earned_usd + self.aero_claimed_usd - self.gas_cost_usd
+
+
+class LiquidityResult:
+    """Intermediate container for liquidity + fee computation."""
+
+    def __init__(self) -> None:
+        self.net_liquidity_usd = Decimal("0")
+        self.gross_deposited_usd = Decimal("0")
+        self.gross_withdrawn_usd = Decimal("0")
+        self.deposit_count = 0
+        self.withdraw_count = 0
+        self.fee_usd = Decimal("0")
 
 
 def _compute_liquidity_and_fees(
@@ -204,12 +224,14 @@ def _compute_liquidity_and_fees(
     our_nfpm_logs: list,
     token_pairs: dict[int, tuple[str, str]],
     to_block: int,
-) -> tuple[Decimal, Decimal]:
+) -> LiquidityResult:
     """
-    Walk filtered NFPM logs and return (net_liquidity_usd, fee_usd).
+    Walk filtered NFPM logs and compute liquidity flows + fees.
 
-    * Net liquidity = SUM(deposits) − SUM(withdrawals), valued at tx-time.
-    * Fees = Collect amounts minus same-tx DecreaseLiquidity (principal).
+    * Gross deposited = SUM of all IncreaseLiquidity in USD.
+    * Gross withdrawn = SUM of all DecreaseLiquidity in USD.
+    * Net liquidity   = gross_deposited − gross_withdrawn.
+    * Fees            = Collect amounts minus same-tx DecreaseLiquidity (principal).
     """
     deposit_events: list[tuple[int, int, int, int]] = []
     withdraw_events: list[tuple[int, int, int, int]] = []
@@ -255,9 +277,14 @@ def _compute_liquidity_and_fees(
                 total += sign * token_amount_to_usd(w3, t1, blk, a1, _token_decimals(w3, t1, to_block))
         return total
 
-    net_liq = _value_events(deposit_events, 1) + _value_events(withdraw_events, -1)
-    fee_usd = _value_events(fee_events, 1)
-    return net_liq, fee_usd
+    result = LiquidityResult()
+    result.gross_deposited_usd = _value_events(deposit_events, 1)
+    result.gross_withdrawn_usd = _value_events(withdraw_events, 1)  # positive value
+    result.deposit_count = len(deposit_events)
+    result.withdraw_count = len(withdraw_events)
+    result.net_liquidity_usd = result.gross_deposited_usd - result.gross_withdrawn_usd
+    result.fee_usd = _value_events(fee_events, 1)
+    return result
 
 
 def _compute_aero_rewards(
@@ -314,7 +341,10 @@ def _print_summary(
     print(f"Address:     {ADDRESS}")
     print(f"Block range: {from_block} -> {to_block}")
     print("-" * 60)
-    print(f"1. Total Net Liquidity Provided (USD): {result.net_liquidity_usd:,.2f}")
+    print(f"1. Gross Deposited (USD):              {result.gross_deposited_usd:,.2f}  ({result.deposit_count} deposits)")
+    print(f"   Gross Withdrawn (USD):              {result.gross_withdrawn_usd:,.2f}  ({result.withdraw_count} withdrawals)")
+    print(f"   Net Liquidity Provided (USD):       {result.net_liquidity_usd:,.2f}")
+    print(f"   Rebalances:                         {result.rebalance_count}")
     print(f"2. Total Trading Fees Earned (USD):    {result.fee_earned_usd:,.2f}")
     print(f"3. Total AERO Rewards Claimed:        {result.aero_claimed_wei} wei | USD: {result.aero_claimed_usd:,.2f}")
     print(f"4. Total Gas Fees Paid (USD):         {result.gas_cost_usd:,.2f}")
@@ -396,9 +426,13 @@ def run_analysis() -> None:
 
     # ── Step 7: Compute PnL metrics ──────────────────────────────────────
     pnl = PnLResult()
-    pnl.net_liquidity_usd, pnl.fee_earned_usd = _compute_liquidity_and_fees(
-        w3, our_nfpm_logs, token_pairs, to_block
-    )
+    liq = _compute_liquidity_and_fees(w3, our_nfpm_logs, token_pairs, to_block)
+    pnl.net_liquidity_usd = liq.net_liquidity_usd
+    pnl.gross_deposited_usd = liq.gross_deposited_usd
+    pnl.gross_withdrawn_usd = liq.gross_withdrawn_usd
+    pnl.deposit_count = liq.deposit_count
+    pnl.withdraw_count = liq.withdraw_count
+    pnl.fee_earned_usd = liq.fee_usd
     pnl.aero_claimed_wei, pnl.aero_claimed_usd = _compute_aero_rewards(w3, our_claims)
     pnl.gas_cost_usd = _compute_gas_costs(w3, our_nfpm_logs, our_claims, to_block)
 
