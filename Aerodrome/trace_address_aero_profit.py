@@ -149,8 +149,11 @@ DEBUG = os.getenv("TRACE_AERO_DEBUG", "").strip().lower() in ("1", "true", "yes"
 LOG_CHUNK_SIZE = 100
 
 # DeFiLlama API (optional API key for higher rate limits)
-DEFILLAMA_BASE_URL = os.getenv("DEFILLAMA_BASE_URL", "https://pro-api.llama.fi").rstrip("/")
-DEFILLAMA_API_KEY = os.getenv("DEFILLAMA_API_KEY")  # optional; if set, inserted in path
+DEFILLAMA_API_KEY = os.getenv("DEFILLAMA_API_KEY")  # optional; if set, pro-api is used
+DEFILLAMA_BASE_URL = os.getenv(
+    "DEFILLAMA_BASE_URL",
+    "https://coins.llama.fi" if not DEFILLAMA_API_KEY else "https://pro-api.llama.fi",
+).rstrip("/")
 DEFILLAMA_CHAIN = "base"  # chain name for DefiLlama (this script targets Base)
 # Base WETH (wrapped native) for ETH price
 WETH_BASE_ADDRESS = "0x4200000000000000000000000000000000000006"
@@ -198,16 +201,18 @@ def _defillama_price_at_block(
     cache_key = (coin_key, ts)
     if cache_key in _defillama_price_cache:
         return _defillama_price_cache[cache_key]
-    base = DEFILLAMA_BASE_URL
     if DEFILLAMA_API_KEY:
-        base = f"{base}/{DEFILLAMA_API_KEY}"
-    url = f"{base}/coins/prices/historical/{ts}/{coin_key}"
+        url = f"https://pro-api.llama.fi/{DEFILLAMA_API_KEY}/coins/prices/historical/{ts}/{coin_key}"
+    else:
+        url = f"https://coins.llama.fi/prices/historical/{ts}/{coin_key}"
     try:
         r = requests.get(url, timeout=15)
         r.raise_for_status()
         data = r.json()
         coins = data.get("coins") or {}
         if not coins:
+            if DEBUG:
+                print(f"[DEBUG] DeFiLlama no coins in response for {coin_key} at ts={ts}")
             _defillama_price_cache[cache_key] = None
             return None
         entry = coins.get(coin_key)
@@ -217,13 +222,19 @@ def _defillama_price_at_block(
                     entry = v
                     break
         if not entry or not isinstance(entry, dict) or "price" not in entry:
+            if DEBUG:
+                print(f"[DEBUG] DeFiLlama no price entry for {coin_key} at ts={ts}, keys={list(coins.keys())}")
             _defillama_price_cache[cache_key] = None
             return None
         price_decimal = Decimal(str(entry["price"]))
         decimals = int(entry.get("decimals", 18))
+        if DEBUG:
+            print(f"[DEBUG] DeFiLlama {coin_key} at ts={ts}: price=${price_decimal}, decimals={decimals}")
         _defillama_price_cache[cache_key] = (price_decimal, decimals)
         return (price_decimal, decimals)
-    except Exception:
+    except Exception as exc:
+        if DEBUG:
+            print(f"[DEBUG] DeFiLlama FAILED for {coin_key} at ts={ts}: {exc}")
         _defillama_price_cache[cache_key] = None
         return None
 
@@ -423,16 +434,16 @@ def decode_nfpm_log(w3: Web3, log: dict, nfpm_contract: Any):
         data = bytes.fromhex(data[2:])
     if topic.lower() == INCREASE_LIQUIDITY_TOPIC.lower():
         token_id = int(log["topics"][1].hex(), 16)
-        # data: liquidity (uint128), amount0 (uint256), amount1 (uint256)
-        liquidity = int.from_bytes(data[:16], "big")
-        amount0 = int.from_bytes(data[16:48], "big")
-        amount1 = int.from_bytes(data[48:80], "big")
+        # ABI encoding: each non-indexed param is a 32-byte slot (uint128 is zero-padded to 32 bytes)
+        liquidity = int.from_bytes(data[0:32], "big")
+        amount0 = int.from_bytes(data[32:64], "big")
+        amount1 = int.from_bytes(data[64:96], "big")
         return ("IncreaseLiquidity", token_id, amount0, amount1, log["blockNumber"])
     if topic.lower() == DECREASE_LIQUIDITY_TOPIC.lower():
         token_id = int(log["topics"][1].hex(), 16)
-        liquidity = int.from_bytes(data[:16], "big")
-        amount0 = int.from_bytes(data[16:48], "big")
-        amount1 = int.from_bytes(data[48:80], "big")
+        liquidity = int.from_bytes(data[0:32], "big")
+        amount0 = int.from_bytes(data[32:64], "big")
+        amount1 = int.from_bytes(data[64:96], "big")
         return ("DecreaseLiquidity", token_id, amount0, amount1, log["blockNumber"])
     if topic.lower() == COLLECT_TOPIC.lower():
         token_id = int(log["topics"][1].hex(), 16)
