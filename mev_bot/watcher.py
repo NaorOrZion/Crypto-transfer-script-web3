@@ -1,26 +1,22 @@
 """
-Real-time block watcher with millisecond timing and pool tick monitoring.
+Real-time block watcher with millisecond timing and cross-block TX execution.
 
-Connects to Base via WebSocket, subscribes to newHeads, and on every block:
+Connects via WebSocket, subscribes to newHeads, and on every block:
   1. Measures receive-to-receive interval (ms precision via perf_counter).
   2. Reads the on-chain timestamp delta (second precision).
-  3. Refreshes the pool's current tick from slot0.
-
-The timing data is essential for the flashblock strategy — knowing the
-sequencer's cadence lets us decide *when* to fire TX 1 (tail of block)
-and TX 2 (top of next block).
+  3. When ARMED: broadcasts TX 1, then TX 2 on the next block.
 """
 
-import asyncio
 import time
 
+from eth_account import Account
 from web3 import AsyncWeb3, Web3, WebSocketProvider
 
 from . import config
+from .ammunition import prepare, _is_token_mode
 
 
 def _parse_hex_or_int(value) -> int | None:
-    """Safely convert a hex string or int from a block header field."""
     if value is None:
         return None
     if isinstance(value, str):
@@ -37,36 +33,39 @@ def _create_http_provider() -> Web3:
 
 async def run() -> None:
     """
-    Main loop — watch blocks, measure timing, monitor tick.
-
-    This function runs forever until interrupted (Ctrl+C).
+    Main loop — watch blocks, measure timing, fire transactions when armed.
     """
-    # ── HTTP provider (contract calls, will also be used for sending txs) ─
     w3 = _create_http_provider()
-    pool = w3.eth.contract(
-        address=Web3.to_checksum_address(config.POOL_ADDRESS),
-        abi=config.POOL_ABI,
-    )
+    account = Account.from_key(config.PRIVATE_KEY)
+    sender = account.address
+    balance = w3.eth.get_balance(sender)
 
-    # ── Initial state ────────────────────────────────────────────────────
-    slot0 = pool.functions.slot0().call()
-    current_tick = slot0[1]
+    token_mode = _is_token_mode()
+    if token_mode:
+        asset_label = f"ERC-20 ({config.TOKEN_ADDRESS[:10]}...)"
+    else:
+        asset_label = "Native ETH"
 
-    print("=" * 55)
-    print("  MEV Micro-Farming Bot — Block Watcher")
-    print("=" * 55)
-    print(f"  Network:    Base (chain {config.CHAIN_ID})")
-    print(f"  HTTP RPC:   {config.RPC_HTTP_URL[:50]}...")
-    print(f"  WSS  RPC:   {config.RPC_WSS_URL[:50]}...")
-    print(f"  Pool:       {config.POOL_ADDRESS}")
-    print(f"  Tick (now):  {current_tick}")
-    print("=" * 55)
+    print("=" * 60)
+    print("  Cross-Block Flashblock Tester")
+    print("=" * 60)
+    print(f"  Chain:      Base Sepolia ({config.CHAIN_ID})")
+    print(f"  HTTP RPC:   {config.RPC_HTTP_URL[:55]}")
+    print(f"  WSS  RPC:   {config.RPC_WSS_URL[:55]}")
+    print(f"  Sender:     {sender}")
+    print(f"  Receiver:   {config.RECEIVER_ADDRESS}")
+    print(f"  Balance:    {Web3.from_wei(balance, 'ether'):.6f} ETH")
+    print(f"  Asset:      {asset_label}")
+    print(f"  TX amounts: {config.TX1_AMOUNT} / {config.TX2_AMOUNT}")
+    print(f"  Armed:      {config.ARMED}")
+    print("=" * 60)
     print()
 
-    # ── WSS provider (block subscription) ────────────────────────────────
     last_receive: float | None = None
     last_chain_ts: int | None = None
     block_count = 0
+    fired = False
+    pending_tx2: bytes | None = None
 
     async with AsyncWeb3(WebSocketProvider(config.RPC_WSS_URL)) as w3_ws:
         if not await w3_ws.is_connected():
@@ -90,6 +89,7 @@ async def run() -> None:
                 interval_ms = (now - last_receive) * 1000
                 interval_str = f"{interval_ms:,.3f} ms"
             else:
+                interval_ms = 0.0
                 interval_str = "—"
 
             if chain_ts is not None and last_chain_ts is not None:
@@ -98,17 +98,37 @@ async def run() -> None:
             else:
                 chain_str = "—"
 
-            # ── Pool tick ────────────────────────────────────────────
-            slot0 = pool.functions.slot0().call()
-            current_tick = slot0[1]
-
-            # ── Print ────────────────────────────────────────────────
             print(
                 f"Block {block_number}  |  "
                 f"interval: {interval_str}  |  "
-                f"chain delta: {chain_str}  |  "
-                f"tick: {current_tick}"
+                f"chain delta: {chain_str}"
             )
+
+            # ── Fire TX 2 if it was queued from the previous block ───
+            if pending_tx2 is not None:
+                try:
+                    tx2_hash = w3.eth.send_raw_transaction(pending_tx2)
+                    print(f"  >> TX 2 SENT (top of block): {tx2_hash.hex()}")
+                except Exception as e:
+                    print(f"  >> TX 2 FAILED: {e}")
+                pending_tx2 = None
+
+            # ── Fire TX 1 + queue TX 2 ───────────────────────────────
+            should_fire = (
+                config.ARMED
+                and not (config.FIRE_ONCE and fired)
+                and block_count >= 3
+            )
+
+            if should_fire:
+                try:
+                    raw_tx1, raw_tx2 = prepare(w3)
+                    tx1_hash = w3.eth.send_raw_transaction(raw_tx1)
+                    print(f"  >> TX 1 SENT (tail of block): {tx1_hash.hex()}")
+                    pending_tx2 = raw_tx2
+                    fired = True
+                except Exception as e:
+                    print(f"  >> TX 1 FAILED: {e}")
 
             # ── Update state ─────────────────────────────────────────
             last_receive = now

@@ -1,8 +1,11 @@
 """
 Central configuration for the MEV micro-farming bot.
 
-Edit this file to change network, pool, wallet, gas, and timing settings.
-Everything the bot needs is configured here — no magic scattered across modules.
+Currently configured for **Base Sepolia** testnet (~2 s blocks, OP Stack)
+to test the cross-block flashblock technique.
+
+Supports native ETH transfers or any ERC-20 token — set TOKEN_ADDRESS
+to switch between them.
 """
 
 import os
@@ -13,121 +16,71 @@ load_dotenv()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Network
+# Network — Base Sepolia  (OP Stack L2 testnet, ~2 s blocks)
 # ═════════════════════════════════════════════════════════════════════════════
-CHAIN_ID = 8453  # Base mainnet
+CHAIN_ID = 84532  # Base Sepolia
 
-# HTTP RPC — used for contract calls (slot0, nonce, base_fee, send_raw_transaction)
-RPC_HTTP_URL = os.getenv("QUICKNODE_BASE_ENDPOINT") or "https://mainnet.base.org"
+# HTTP RPC — nonce, gas, send_raw_transaction
+INFURA_PROJECT_ID = os.getenv("infura_project_id", "")
+RPC_HTTP_URL = os.getenv("BASE_SEPOLIA_HTTP_URL") or f"https://base-sepolia.infura.io/v3/{INFURA_PROJECT_ID}"
 
-# WSS RPC — used for newHeads subscription (real-time block notifications)
-# Auto-derived from the HTTP URL for QuickNode; override with env var if needed.
-_http = os.getenv("QUICKNODE_BASE_ENDPOINT", "")
-_auto_wss = _http.replace("https://", "wss://").replace("http://", "ws://") if _http else ""
-RPC_WSS_URL = os.getenv("QUICKNODE_BASE_WSS_ENDPOINT") or _auto_wss or "wss://mainnet.base.org"
+# WSS RPC — newHeads subscription (public Base Sepolia doesn't support WSS, use Infura)
+RPC_WSS_URL = os.getenv("BASE_SEPOLIA_WSS_URL") or f"wss://base-sepolia.infura.io/ws/v3/{INFURA_PROJECT_ID}"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Wallets
 # ═════════════════════════════════════════════════════════════════════════════
-# The private key of the wallet that signs and sends both transactions.
 PRIVATE_KEY = os.getenv("sender_private_key", "")
-
-# Second wallet — can be used as a recipient in your contract if needed.
 RECEIVER_ADDRESS = os.getenv("receiver_address", "")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Pool  (Aerodrome Slipstream WETH/USDC on Base)
+# Token  (leave empty for native ETH transfers)
 # ═════════════════════════════════════════════════════════════════════════════
-POOL_ADDRESS = "0xb2cc224c1c9fee385f8ad6a55b4d94e92359dc59"
+# Set to an ERC-20 contract address to transfer that token instead of ETH.
+# Examples:
+#   ""                                             → native ETH
+#   "0x036CbD53842c5426634e7929541eC2318f3dCF7e"  → USDC on Base Sepolia
+#   "0x4200000000000000000000000000000000000006"  → WETH on Base Sepolia
+TOKEN_ADDRESS = os.getenv("TOKEN_ADDRESS", "")
 
-POOL_ABI = [
-    {
-        "inputs": [],
-        "name": "slot0",
-        "outputs": [
-            {"name": "sqrtPriceX96", "type": "uint160"},
-            {"name": "tick", "type": "int24"},
-            {"name": "observationIndex", "type": "uint16"},
-            {"name": "observationCardinality", "type": "uint16"},
-            {"name": "observationCardinalityNext", "type": "uint16"},
-            {"name": "unlocked", "type": "bool"},
-        ],
-        "stateMutability": "view",
-        "type": "function",
-    },
-]
+# Number of token decimals (only used when TOKEN_ADDRESS is set).
+# ETH / WETH = 18, USDC = 6, etc.
+TOKEN_DECIMALS = int(os.getenv("TOKEN_DECIMALS", "18"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Custom Solidity contract  (enterAndStake / unstakeAndExit)
+# Transfer amounts
 # ═════════════════════════════════════════════════════════════════════════════
-# Set this to your deployed contract address (or add MEV_CONTRACT_ADDRESS to .env)
-CONTRACT_ADDRESS = os.getenv("MEV_CONTRACT_ADDRESS", "")
-
-CONTRACT_ABI = [
-    {
-        "inputs": [
-            {"name": "tickLower", "type": "int24"},
-            {"name": "tickUpper", "type": "int24"},
-            {"name": "amount0Desired", "type": "uint256"},
-            {"name": "amount1Desired", "type": "uint256"},
-            {"name": "amount0Min", "type": "uint256"},
-            {"name": "amount1Min", "type": "uint256"},
-            {"name": "deadline", "type": "uint256"},
-            {"name": "gauge", "type": "address"},
-        ],
-        "name": "enterAndStake",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-    {
-        "inputs": [
-            {"name": "tokenId", "type": "uint256"},
-            {"name": "amount0Min", "type": "uint256"},
-            {"name": "amount1Min", "type": "uint256"},
-            {"name": "deadline", "type": "uint256"},
-            {"name": "gauge", "type": "address"},
-        ],
-        "name": "unstakeAndExit",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-]
+# When TOKEN_ADDRESS is empty  → amount in wei   (1000 wei ≈ nothing)
+# When TOKEN_ADDRESS is set    → amount in the token's smallest unit
+TX1_AMOUNT = int(os.getenv("TX1_AMOUNT", "1000"))
+TX2_AMOUNT = int(os.getenv("TX2_AMOUNT", "1000"))
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Gauge
+# Gas strategy (EIP-1559)
 # ═════════════════════════════════════════════════════════════════════════════
-GAUGE_ADDRESS = "0xF33a96b5932D9E9B9A0eDA447AbD8C9d48d2e0c8"
+# TX 1: low tip → tail of current block
+TX1_PRIORITY_FEE_GWEI = float(os.getenv("TX1_PRIORITY_FEE_GWEI", "0.001"))
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Gas strategy  (EIP-1559 for Base sequencer)
-# ═════════════════════════════════════════════════════════════════════════════
-# TX 1 (enter): low tip → sequencer includes it naturally at the tail of the block
-ENTER_PRIORITY_FEE_GWEI = 0.001
-
-# TX 2 (exit): boosted tip → sequencer prioritises it at the top of the next block
-EXIT_PRIORITY_FEE_GWEI = 0.1
+# TX 2: boosted tip → top of next block
+TX2_PRIORITY_FEE_GWEI = float(os.getenv("TX2_PRIORITY_FEE_GWEI", "0.1"))
 
 # Safety multiplier over base_fee for maxFeePerGas ceiling
 BASE_FEE_MULTIPLIER = 2
 
-# Conservative gas limits to prevent out-of-gas reverts
-ENTER_GAS_LIMIT = 600_000
-EXIT_GAS_LIMIT = 500_000
+# Gas limit — 21 000 for native ETH, ~65 000 for ERC-20 transfer()
+ETH_GAS_LIMIT = 21_000
+TOKEN_GAS_LIMIT = 80_000
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Timing
+# Execution control
 # ═════════════════════════════════════════════════════════════════════════════
-# Deadline for on-chain transactions (seconds from now)
-DEADLINE_SECONDS = 60
+# Set to True to actually broadcast transactions. False = watch-only.
+ARMED = bool(os.getenv("ARMED", "").strip().lower() in ("1", "true", "yes"))
 
-# Dummy tokenId passed to unstakeAndExit — the contract uses its internal
-# lastMintedTokenId instead of this value.
-DUMMY_TOKEN_ID = 0
+# Only fire once per run (to avoid draining testnet funds in a loop)
+FIRE_ONCE = True
