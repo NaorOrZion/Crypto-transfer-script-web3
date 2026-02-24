@@ -21,11 +21,10 @@ load_dotenv()
 CHAIN_ID = 84532  # Base Sepolia
 
 # HTTP RPC — nonce, gas, send_raw_transaction
-INFURA_PROJECT_ID = os.getenv("infura_project_id", "")
-RPC_HTTP_URL = os.getenv("BASE_SEPOLIA_HTTP_URL") or f"https://base-sepolia.infura.io/v3/{INFURA_PROJECT_ID}"
+RPC_HTTP_URL = os.getenv("INFURA_BASE_HTTP_URL")
 
 # WSS RPC — newHeads subscription (public Base Sepolia doesn't support WSS, use Infura)
-RPC_WSS_URL = os.getenv("BASE_SEPOLIA_WSS_URL") or f"wss://base-sepolia.infura.io/ws/v3/{INFURA_PROJECT_ID}"
+RPC_WSS_URL = os.getenv("INFURA_BASE_WSS_URL")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
